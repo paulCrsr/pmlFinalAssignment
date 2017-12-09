@@ -1,0 +1,164 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "Paul Osborne"
+date: "09/12/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise. This is the "classe" variable in the training set (https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). All other variables are used to predict with. 
+
+The output of this assingment is a prediction model that can be used to predict the "classe" in 20 test cases in https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv.
+
+All data are provided courtesy of http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har.
+
+## How to tell when the model good enough
+
+Our goal for this assignment is to create a prediction model that:
+
+  - Correctly predicts the *classe* of the 20 test cases,
+  - with 95% confidence.
+
+### What accuracy will the model require to achieve this? 
+
+Accuracy can be estimated using the cumulative Binomial distribution.
+
+$$
+    Pr\{X \geq x \} = \sum_{k=x}^n \binom{n}{k} p^k (1-p)^{n-k} \\
+$$
+Where: 
+
+  - $p$ is the probability of success (algorithm accuracy), 
+  - $n$ is the number of questions (20) and 
+  - $k$ is the minimum number of correct answers required (also 20).
+
+Using this function and R's *qbinom* function we can test a few accuracies (*prob*) to see how many correct predictions we should expect at the 95% confidence level.
+
+```{r probabilities}
+unlist(list(
+    "95% accuracy" = qbinom(0.95, size=20, prob=0.95, lower.tail=FALSE),
+    "99% accuracy" = qbinom(0.95, size=20, prob=0.99, lower.tail=FALSE),
+    "99.5% accuracy" = qbinom(0.95, size=20, prob=0.995, lower.tail=FALSE),
+    "99.8% accuracy" = qbinom(0.95, size=20, prob=0.998, lower.tail=FALSE)
+))
+```
+
+Therfore, we should **seek a model with ~99.8% accuracy**, or better, so that we can
+predict all 20 test cases with 95% confidence.
+
+## Method
+### Data Cleansing
+
+```{r dataprep, message=FALSE, warning=FALSE, cache=TRUE}
+loaded <- read.csv("pml-training.csv", na.strings=c("", "NA", "na", "#DIV/0!"))
+dim(loaded)
+```
+
+The data set contains many columns which could slow training.  
+We now reduce the number of dimensions (from 160 to 56) by removing:
+
+  - Columns with 10%, or more, NAs,
+  - Columns not useful for classification (user name and timestamps).
+
+```{r reduce dimensions, warning=FALSE, messsage=FALSE}
+library(dplyr, warn.conflicts=FALSE)
+# @param df Data frame with all columsns.
+# @param na.threshold The max percentage of NAs to allow.
+# @return Data frame where all columns have NA percentage below the threshold.
+selectColsWithData <- function(df, na.threshold=0.1) {
+    colsWithData <- function(df) {
+        nrows <- nrow(loaded)
+        perc <- unlist(lapply(loaded, FUN = function(col) sum(is.na(col)) / nrows))
+        names(perc[perc <= na.threshold])
+    }
+    select(df, colsWithData(df)) 
+}
+
+cleaned <- 
+    selectColsWithData(loaded, 0.1) %>% 
+    select(-X, -user_name, -raw_timestamp_part_1, -raw_timestamp_part_2)
+
+dim(cleaned)
+names(cleaned)
+```
+
+### Model
+
+First, we attempt to see how well a random forest performs. A random forest was
+chosen initially because:
+
+1. They tend to have good accuracy.
+2. Our data set it relatively small.
+3. Compution time is less important than accuracy.
+
+If the model does not achieve the desired 99.8% accuracy then we will investigate alternatives.
+
+```{r setupTraining}
+training <- cleaned
+```
+
+#### Performance
+Initial investigates proved training/cross-validation with a single thread to be too slow
+so the *parallel* package was used to enable use of multiple cores and reduce computation time. See 
+https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md
+for more details.
+
+Setup a cluster to enable multi-threading...
+
+``` {r cluster, message=FALSE, warnings=FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+#### Cross Validation
+
+K-fold cross validation is used with 5 folds during training.
+
+```{r avoidTzWarnings, echo=FALSE}
+Sys.setenv(TZ="Europe/London")
+```
+
+``` {r cross-validation, message=FALSE, warnings=FALSE}
+library(caret)
+set.seed(1)
+
+# Use K-Fold cross-validation
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+# Train the Random Forest...
+m1 <- train(classe ~ ., data=training, method="rf", trControl=fitControl)
+
+# Return to single-threading...
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+## Results
+
+```{r results}
+m1
+m1$resample
+confusionMatrix.train(m1)
+```
+
+### Predicted Out-of-Sample Error
+
+```{r outofsampleerr}
+accuracy <- mean(m1$resample$Accuracy)
+outOfSampleError <- 1 - accuracy
+```
+
+The mean accurancy was `r signif(accuracy * 100, 4)`% meaning that the predicted out-of-sample error is `r signif(outOfSampleError * 100, 4)`%.
+
+## Conclusions
+
+A single random forest model was able to meet the required 99.8% accuracy. 
+
+Investigation of other algorithms and combinations of algorithms is unlikely
+to provide significant improvement.
